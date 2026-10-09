@@ -5,30 +5,45 @@ Track 3: Building Future-Ready Industries – Infrastructure, Innovation & Decen
 24-hour build. Everything must be written in **Python**.
 
 ## What ResQMesh does
-A decision-support platform for restoring damaged infrastructure after disasters
+A decision-support app for restoring damaged infrastructure after disasters
 (roads, bridges, power, telecom, water, hospitals, industries). It answers:
 - **What** to restore first (explainable priority scoring)
-- **Who** should restore it (skill- and distance-based crew assignment, with crew safety limits)
-- **How** teams stay connected when networks fail (store-and-forward mesh messaging)
+- **Who** should restore it (skill- and distance-based crew assignment, with decent-work safeguards)
+- **What it costs** the local economy (economic impact analytics)
 
 It is a decision-support prototype, not a replacement for official emergency or utility authorities.
+
+## Scope – exactly these 8 features (nothing else)
+1. **Damage Reporting** – crews report damage from the phone app; supervisors can also add reports on the web.
+2. **Smart Priority Scoring** – explainable 0–100 score with a "Why?" breakdown.
+3. **Live Incident Map** – incidents on a map, colored by priority.
+4. **Crew Management** – crew registry: skills, location, status, hours worked.
+5. **Smart Crew Assignment** – best crew per incident by skill and distance.
+6. **Decent Work & Safety Safeguards** – shift-hour limits, fatigue blocking, safety checklist for hazardous jobs.
+7. **Economic Impact Analytics** – businesses/workers affected, "Restore First" ranking.
+8. **Reports & Export** – CSV export and an end-of-day restoration summary.
+
+Out of scope (do NOT build): mesh/Bluetooth/offline relay, duplicate detection, public website pages, alerts/broadcasts, SOS, multilingual.
+
+## Two parts
+- **Web dashboard (NiceGUI)** – for supervisors. Runs on the laptop. Features 2–8, plus adding reports.
+- **Phone app (Flet)** – for field crews. Feature 1 (Report Damage), My Tasks (see assigned jobs, update status) and My Shift (own hours and fatigue warning).
+- Both use one server and one SQLite database. The phone app talks to the server's REST API over the same Wi-Fi/hotspot.
 
 ## Project structure
 ```
 resqmesh/
-├── server/      # NiceGUI website + dashboard + REST API (runs on the laptop)
-│   ├── main.py
+├── server/              # NiceGUI dashboard + REST API (runs on the laptop)
+│   ├── main.py          # pages + API endpoints
 │   ├── database.py      # SQLite
 │   ├── scoring.py       # priority score + breakdown
-│   ├── duplicates.py    # duplicate detection
-│   ├── assignment.py    # crew-to-incident matching (scipy)
+│   ├── assignment.py    # crew-to-incident matching (scipy) + safeguards
 │   ├── analytics.py     # economic + workforce analytics (pandas)
-│   └── demo_data.py     # sample reports, crews, assets
-├── mobile/      # Flet app for field crews (built into an Android APK)
-│   └── src/main.py
-└── mesh/        # mesh node logic, shared by laptops and the phone app (local Wi-Fi, UDP)
-    ├── node.py
-    └── udp_transport.py
+│   ├── reports.py       # CSV export + daily summary
+│   ├── demo_data.py     # sample reports and crews
+│   └── seed.py          # create + fill the database
+└── mobile/              # Flet app for field crews (built into an Android APK)
+    └── src/main.py
 ```
 
 ## Environment (important)
@@ -38,29 +53,24 @@ resqmesh/
 - Project lives in OneDrive; keep the SQLite DB file small and close connections properly.
 
 ## Tech stack
-- **Server:** NiceGUI (UI, pages, maps via `ui.leaflet`, charts via `ui.echart`), SQLite (`sqlite3`), pandas, scikit-learn/difflib, scipy.
-- **Mobile:** Flet + `requests` ONLY. No pandas/scipy/sklearn in the mobile app.
-- **Mesh:** local Wi-Fi only (no Bluetooth). Python built-in `socket` with UDP: broadcast to find nearby devices, then exchange outboxes. Devices join one phone's hotspot (mobile data off), so no internet is needed. The same mesh code runs on laptops and inside the Flet phone app.
+- **Server:** NiceGUI (pages, `ui.leaflet` map, `ui.echart` charts, `ui.table`, `ui.dialog`), SQLite (`sqlite3`), pandas, scipy.
+- **Mobile:** Flet + `requests` ONLY. No pandas/scipy in the mobile app.
 
 ## Server
-- Run with `ui.run(host="0.0.0.0", port=8080)` so phones on the same hotspot can reach it.
-- Website pages: `/` Home (public intro, Track 3, SDG 8 & 9), `/alerts` (public), `/report` (public form),
-  `/dashboard` (supervisors), `/crews` (supervisors).
-- REST API for the mobile app and mesh nodes (NiceGUI's `app` is FastAPI):
-  - `POST /api/reports` – new damage report
-  - `POST /api/checkin` – crew status (Safe / Needs Help / Unreachable)
+- Run with `ui.run(host="0.0.0.0", port=8080, title="ResQMesh")` so phones on the same Wi-Fi can reach it.
+- Dashboard pages (left sidebar): `/` Dashboard (summary cards + priority queue + map), `/crews`, `/analytics`, `/reports`.
+- REST API for the phone app (NiceGUI's `app` is FastAPI):
+  - `POST /api/reports` – new damage report, returns id, score and level
+  - `GET  /api/reports` – all reports with score and level
+  - `GET  /api/crews/{crew_id}` – crew details incl. hours worked and warnings
   - `GET  /api/tasks/{crew_id}` – incidents assigned to a crew
-  - `POST /api/tasks/{report_id}/status` – status update
-  - `GET  /api/alerts` – active alerts
-  - `POST /api/messages` – batch upload of mesh messages (dedupe by message id)
+  - `POST /api/tasks/{report_id}/status` – crew updates status
 
 ## Database tables
-- reports: id, asset_type, lat, lng, severity (1–5), description, people_affected, businesses_affected, status, created_at, merged_into
-- crews: id, name, skill, lat, lng, status, hours_worked
-- assignments: report_id, crew_id, assigned_at, safety_checked
-- messages: msg_id, origin, type, payload, ttl, status, created_at
-- alerts: id, zone, message, created_at
-- Status workflow: Reported → Verified → Assigned → In Progress → Restored
+- reports: id, asset_type, lat, lng, severity (1–5), description, people_affected, businesses_affected, workers_affected, status, created_at, restored_at
+- crews: id, name, skill, lat, lng, status (Available / Assigned / On-site / Off-duty), hours_worked
+- assignments: id, report_id, crew_id, assigned_at, safety_checked
+- Status workflow: Reported → Assigned → In Progress → Restored
 
 ## Core logic
 - **Priority score (0–100, always return the breakdown):**
@@ -69,49 +79,35 @@ resqmesh/
   - People affected: min(people_affected / 200, 20)
   - Time waiting: min(hours_waiting × 2, 15)
   - Levels: Critical ≥ 75, High ≥ 55, Medium ≥ 35, else Low
-- **Duplicates:** same asset_type AND within 500 m (haversine) AND description similarity > 0.6 (difflib.SequenceMatcher).
-- **Crew assignment:** cost = distance (km) + 1000 if skill mismatch + 1000 if hours_worked ≥ 12; solve with `scipy.optimize.linear_sum_assignment`. Supervisor can override.
-- **Safety:** require a safety checklist before hazardous jobs (power, damaged bridge/structure); block crews over the shift limit.
-- **Economic impact:** businesses_affected × avg daily revenue × days down; "Restore First" view sorts by impact.
+- **Crew assignment:** cost = distance (km) + 1000 if skill mismatch + 1000 if the crew is blocked by safeguards; solve with `scipy.optimize.linear_sum_assignment`. Supervisor can accept or override.
+  Skill map: power→electrical, telecom→telecom, water→plumbing, road/bridge→civil, hospital→electrical, industry→electrical.
+- **Decent work & safety safeguards:**
+  - Shift limit 12 h: crews at ≥ 12 h are blocked from new assignments; ≥ 10 h shows a fatigue warning.
+  - Hazardous jobs (power, bridge, hospital) need a 3-item safety checklist ticked before the assignment is saved.
+  - Show each crew's hours and warnings on the Crews page and in the phone app.
+- **Economic impact:** impact (₹) = businesses_affected × 15000 (avg daily revenue, labelled as an assumption) × days_down; also show workers_affected. "Restore First" sorts open incidents by impact.
+- **Reports & export:** CSV export of incidents, crews and assignments; a daily summary (incidents by status, restored today, top 5 by impact, crew hours).
 
-## Mesh messages
-```json
-{"id": "uuid", "origin": "crew_03", "type": "report|checkin|status|alert",
- "payload": {}, "ttl": 5, "created_at": "ISO-8601"}
-```
-Each node keeps an outbox and a set of seen IDs. On contact, nodes exchange outboxes, skip seen IDs,
-decrement TTL, and drop messages at TTL 0. Any node that can reach the server POSTs its outbox to `/api/messages`.
-Message status: Queued → Relayed → Delivered.
-No Bluetooth is used. If a hotspot blocks broadcast (client isolation), send directly to the hotspot phone's IP instead.
-
-## Mobile app (Flet) screens
-1. Report Damage – asset type, severity, description, location (manual first), photo (optional)
-2. Crew Check-in – Safe / Needs Help / Unreachable
-3. My Tasks – assigned incidents with status buttons
-4. Alerts – unsafe zones and critical incidents
-5. Messages – queued / relayed / delivered
-- Server URL must be configurable in the app (e.g. a settings field), default `http://192.168.x.x:8080`.
-- If the server is unreachable, queue the item in the phone's mesh outbox and pass it to nearby phones/laptops over local Wi-Fi (UDP) until any device reaches the server.
-- Keep mesh code pure Python (socket, json, uuid) so it runs inside the Flet app.
-
-## Features by phase
-- **During disaster:** mesh messaging, alerts, crew safety check-in, live situation map.
-- **After disaster:** damage reporting, priority scoring, duplicate detection, incident map, crew assignment,
-  restoration tracking, economic impact analytics, restoration dashboard, workforce analytics, export + lessons learned.
-- **Both:** crew management, demo mode (one-click sample data + simulated incoming reports).
+## Phone app (Flet) screens
+1. Report Damage – asset type tiles, severity 1–5 buttons, description, location (manual lat/lng or a preset area), people/businesses affected.
+2. My Tasks – assigned incidents with Start / Restored buttons.
+3. My Shift – hours worked and fatigue warning.
+- Server URL and crew ID are set in a Settings field (default server `http://192.168.x.x:8080`).
+- If the server can't be reached, show a clear error and keep the form filled so the crew can retry.
 
 ## Build order
 1. Database + demo data
-2. Report form + API + priority scoring
-3. Incident queue + live map
-4. Crew registry + assignment + safety checks
-5. Flet mobile screens connected to the API
-6. Mesh messaging over local Wi-Fi (UDP), phones and laptops
-7. Dashboard, analytics, export
-8. Testing, demo mode, pitch
+2. Dashboard skeleton
+3. Scoring + report API + priority queue; phone Report Damage screen
+4. Live incident map
+5. Crew management
+6. Crew assignment + safety safeguards; phone My Tasks + My Shift
+7. Economic impact analytics
+8. Reports & export
+9. Testing, demo reset, pitch
 
 ## Coding guidelines
 - Keep code simple and readable; the team must be able to explain it to judges.
 - Small, working steps: run the app after each change.
-- Add short comments on scoring, duplicate detection, assignment and mesh logic.
-- Don't add heavy dependencies beyond the stack above without asking.
+- Add short comments on scoring, assignment, safeguards and impact logic.
+- Don't add features outside the 8 in scope. Don't add heavy dependencies.
