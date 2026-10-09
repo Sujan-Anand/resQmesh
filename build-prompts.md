@@ -1,6 +1,6 @@
 # ResQMesh – build prompts (for A)
 
-Copy one prompt at a time into Claude Code. Run and test after each one, then commit and push:
+Copy one prompt at a time into Claude Code. After each one, go through its **Check it worked** list. Only when every box is ticked, commit and push:
 
 ```
 git add -A
@@ -35,6 +35,12 @@ Keep the code simple with short comments. Tell me the exact command to run it on
 (I use `py`, not `python`).
 ```
 
+**Check it worked (Prompt 1)**
+- [ ] `py server/seed.py` runs with no red errors.
+- [ ] A file `server/resqmesh.db` now exists.
+- [ ] Run `py server/seed.py` a second time: no error and no duplicate rows.
+- [ ] Open the database in DB Browser for SQLite (or ask Claude Code for a one-line check): about 20 reports and 8 crews.
+
 ### Prompt 2 – NiceGUI skeleton
 ```
 Read resqmesh-brief.md first.
@@ -49,6 +55,12 @@ Create server/main.py with NiceGUI:
 
 Tell me how to run it and which URL to open.
 ```
+
+**Check it worked (Prompt 2)**
+- [ ] `py server/main.py` starts and prints a URL with port 8080.
+- [ ] `http://localhost:8080/dashboard` shows the reports table.
+- [ ] `/crews` shows 8 crews; sidebar links switch pages.
+- [ ] On your phone (same Wi-Fi/hotspot), `http://<laptop-IP>:8080/dashboard` opens. If not, allow Python in Windows Firewall.
 
 ---
 
@@ -71,6 +83,13 @@ Read resqmesh-brief.md first.
 Add a tiny test I can run with py to check scoring gives sensible numbers.
 ```
 
+**Check it worked (Prompt 3)**
+- [ ] The scoring test runs with `py` and passes.
+- [ ] A severity 5 hospital report scores higher than a severity 2 road report.
+- [ ] `/dashboard` is sorted by score, highest first, with Critical/High/Medium/Low badges.
+- [ ] "Why?" opens a dialog whose four parts add up to the score.
+- [ ] Open `http://localhost:8080/docs`, try POST /api/reports with a sample report: it returns an id and score, and the report appears on the dashboard after refresh.
+
 ### Prompt 4 – Duplicate detection
 ```
 Read resqmesh-brief.md first.
@@ -82,6 +101,11 @@ Create server/duplicates.py:
 When a report arrives through POST /api/reports, mark duplicates with merged_into pointing to
 the original. In the dashboard queue show "3 reports" on the original and hide merged ones.
 ```
+
+**Check it worked (Prompt 4)**
+- [ ] Send the same report twice via `/docs` (same asset, same spot, similar text): the second is merged, and the queue shows "2 reports" on one row.
+- [ ] Send a report of the same asset type but ~2 km away: it is NOT merged.
+- [ ] Send a different asset type at the same spot: it is NOT merged.
 
 ---
 
@@ -100,6 +124,13 @@ Also add POST /api/messages to server/main.py that stores messages (deduplicated
 for type "report", creates the report through the same code as /api/reports.
 Show me how to test it with two nodes on one laptop.
 ```
+
+**Check it worked (Prompt 5)**
+- [ ] Two test nodes on one laptop: a message added on node 1 appears on node 2 after sync.
+- [ ] Syncing again does not create a duplicate (seen ids work).
+- [ ] A message with ttl 1 is not passed on a second hop.
+- [ ] Stop the server, add a message, restart the node: the message is still in the outbox (JSON file).
+- [ ] Start the server and upload: a "report" message appears on the dashboard, and uploading twice does not duplicate it.
 
 ---
 
@@ -121,6 +152,13 @@ the assignment is saved only when all are ticked.
 Add endpoints: GET /api/tasks/{crew_id}, POST /api/tasks/{report_id}/status, POST /api/checkin.
 ```
 
+**Check it worked (Prompt 6)**
+- [ ] Each unassigned incident shows a suggested crew with a matching skill (power → electrical, etc.).
+- [ ] A crew with 12+ hours is never suggested.
+- [ ] Assign on a power or bridge job opens the safety checklist; it only saves when all three are ticked.
+- [ ] `/docs`: GET /api/tasks/{crew_id} returns that crew's tasks; POST a status update and the dashboard changes after refresh.
+- [ ] POST /api/checkin with "Needs Help" is stored.
+
 ### Prompt 7 – Bluetooth transport
 ```
 Read resqmesh-brief.md first.
@@ -135,6 +173,13 @@ Create mesh/bt_transport.py for Windows:
 Add mesh/run_node.py with simple command-line options, and tell me exactly how to find each
 laptop's Bluetooth MAC address on Windows and test it between two paired laptops.
 ```
+
+**Check it worked (Prompt 7)**
+- [ ] Both laptops are paired in Windows Bluetooth settings first.
+- [ ] Laptop 1 runs the node as server, laptop 2 syncs: a message from laptop 2 appears on laptop 1.
+- [ ] Turn Wi-Fi off on laptop 2 and repeat: it still works over Bluetooth.
+- [ ] Full chain: laptop 2 (offline) → Bluetooth → laptop 1 → uploads → report appears on the dashboard.
+- [ ] If Bluetooth fails after ~1 hour of trying, switch to `--udp` and confirm the same chain works over the hotspot. Don't lose more time.
 
 ---
 
@@ -151,6 +196,12 @@ Create server/analytics.py with pandas:
 - workforce_summary() – per crew: hours worked, tasks done; and skills that ran short
 Add GET /api/analytics returning these, plus a CSV export button on the dashboard.
 ```
+
+**Check it worked (Prompt 8)**
+- [ ] Restore First list is sorted by impact, highest first, and excludes restored incidents.
+- [ ] Spot-check one row by hand: businesses × 15000 × days down matches the number shown.
+- [ ] `/api/analytics` returns data in the browser.
+- [ ] CSV export downloads a file that opens in Excel with the right columns.
 
 ---
 
