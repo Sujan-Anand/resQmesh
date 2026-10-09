@@ -26,9 +26,9 @@ resqmesh/
 │   └── demo_data.py     # sample reports, crews, assets
 ├── mobile/      # Flet app for field crews (built into an Android APK)
 │   └── src/main.py
-└── mesh/        # laptop mesh node (Bluetooth RFCOMM + Wi-Fi/UDP fallback)
+└── mesh/        # mesh node logic, shared by laptops and the phone app (local Wi-Fi, UDP)
     ├── node.py
-    └── bt_transport.py
+    └── udp_transport.py
 ```
 
 ## Environment (important)
@@ -40,7 +40,7 @@ resqmesh/
 ## Tech stack
 - **Server:** NiceGUI (UI, pages, maps via `ui.leaflet`, charts via `ui.echart`), SQLite (`sqlite3`), pandas, scikit-learn/difflib, scipy.
 - **Mobile:** Flet + `requests` ONLY. No pandas/scipy/sklearn in the mobile app.
-- **Mesh:** Python built-in `socket` with `AF_BLUETOOTH` / `BTPROTO_RFCOMM` (Windows/Linux), plus a UDP/Wi-Fi fallback with the same message format.
+- **Mesh:** local Wi-Fi only (no Bluetooth). Python built-in `socket` with UDP: broadcast to find nearby devices, then exchange outboxes. Devices join one phone's hotspot (mobile data off), so no internet is needed. The same mesh code runs on laptops and inside the Flet phone app.
 
 ## Server
 - Run with `ui.run(host="0.0.0.0", port=8080)` so phones on the same hotspot can reach it.
@@ -82,6 +82,7 @@ resqmesh/
 Each node keeps an outbox and a set of seen IDs. On contact, nodes exchange outboxes, skip seen IDs,
 decrement TTL, and drop messages at TTL 0. Any node that can reach the server POSTs its outbox to `/api/messages`.
 Message status: Queued → Relayed → Delivered.
+No Bluetooth is used. If a hotspot blocks broadcast (client isolation), send directly to the hotspot phone's IP instead.
 
 ## Mobile app (Flet) screens
 1. Report Damage – asset type, severity, description, location (manual first), photo (optional)
@@ -90,7 +91,8 @@ Message status: Queued → Relayed → Delivered.
 4. Alerts – unsafe zones and critical incidents
 5. Messages – queued / relayed / delivered
 - Server URL must be configurable in the app (e.g. a settings field), default `http://192.168.x.x:8080`.
-- If the server is unreachable, queue the item locally and retry.
+- If the server is unreachable, queue the item in the phone's mesh outbox and pass it to nearby phones/laptops over local Wi-Fi (UDP) until any device reaches the server.
+- Keep mesh code pure Python (socket, json, uuid) so it runs inside the Flet app.
 
 ## Features by phase
 - **During disaster:** mesh messaging, alerts, crew safety check-in, live situation map.
@@ -104,7 +106,7 @@ Message status: Queued → Relayed → Delivered.
 3. Incident queue + live map
 4. Crew registry + assignment + safety checks
 5. Flet mobile screens connected to the API
-6. Mesh messaging + UDP fallback
+6. Mesh messaging over local Wi-Fi (UDP), phones and laptops
 7. Dashboard, analytics, export
 8. Testing, demo mode, pitch
 
