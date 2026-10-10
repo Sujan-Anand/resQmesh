@@ -50,8 +50,14 @@ def now():
 
 def connect(path=None):
     """Open a connection to the database in use (or to `path`). Rows can be turned into dicts."""
-    conn = sqlite3.connect(path or DB_PATH)
+    target = Path(path or DB_PATH)
+    # A missing or empty file (e.g. deleted while the server runs) gets its tables straight away
+    is_new = not target.exists() or target.stat().st_size == 0
+    conn = sqlite3.connect(target)
     conn.row_factory = sqlite3.Row
+    if is_new:
+        conn.executescript(SCHEMA)
+        conn.commit()
     return conn
 
 
@@ -73,7 +79,12 @@ def fetch(sql, params=(), path=None):
 def init_db(path=None):
     """Create the three tables if they do not exist yet."""
     with closing(connect(path)) as conn:
-        conn.executescript("""
+        conn.executescript(SCHEMA)
+        conn.commit()
+
+
+# The three tables from the brief
+SCHEMA = """
             CREATE TABLE IF NOT EXISTS reports (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 asset_type TEXT NOT NULL,
@@ -106,8 +117,7 @@ def init_db(path=None):
                 assigned_at TEXT NOT NULL,
                 safety_checked INTEGER DEFAULT 0    -- 1 = safety checklist was ticked
             );
-        """)
-        conn.commit()
+"""
 
 
 def clear_all(path):

@@ -215,6 +215,8 @@ def layout(title):
     ui.colors(primary=TEAL)
 
     demo = database.demo_mode()  # the mode this page was drawn in
+    if demo:
+        seed.ensure_demo_database()  # refill resqmesh_demo.db if the file was deleted or is empty
 
     def switch_mode(on):
         """Demo mode switch: change which database file is used, then redraw this page."""
