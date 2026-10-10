@@ -21,13 +21,18 @@ MAX_POINTS = {
 
 def priority(report, hours_waiting):
     """Return (score 0-100, breakdown dict) for one report."""
+    # Keep bad input inside its allowed range, so the score always stays 0-100
+    severity = min(max(report["severity"], 1), 5)
+    people = max(report["people_affected"], 0)
+    hours_waiting = max(hours_waiting, 0)
+
     breakdown = {
         # Severity 1-5, 8 points each (max 40)
-        "Severity": report["severity"] * 8,
+        "Severity": severity * 8,
         # Asset criticality 1-5, 5 points each (max 25)
         "Asset criticality": CRITICALITY.get(report["asset_type"], 0) * 5,
         # 1 point per 200 people affected (max 20)
-        "People affected": min(report["people_affected"] / 200, 20),
+        "People affected": min(people / 200, 20),
         # 2 points per hour the incident has been waiting (max 15)
         "Time waiting": min(hours_waiting * 2, 15),
     }

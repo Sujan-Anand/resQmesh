@@ -34,6 +34,10 @@ for name, data, hours, _, _ in CASES:
     assert 0 <= score <= 100, f"{name}: score {score} is outside 0-100"
     assert round(sum(breakdown.values()), 1) == score, f"{name}: parts do not add up to the score"
 
+# Bad input (negative people, negative wait, severity above 5) cannot push the score outside 0-100
+assert priority(report("road", 1, -500), -3)[0] == 18, "negative values should count as zero"
+assert priority(report("hospital", 9, 9999), 99)[0] == 100, "severity above 5 should count as 5"
+
 # Level boundaries from the brief
 assert [level(s) for s in (75, 74.9, 55, 54.9, 35, 34.9)] == \
     ["Critical", "High", "High", "Medium", "Medium", "Low"]
