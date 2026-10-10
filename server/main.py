@@ -1,5 +1,6 @@
 """ResQMesh web dashboard + REST API (NiceGUI). Run from the resqmesh folder:   py server/main.py"""
 
+import time
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -11,6 +12,7 @@ from pydantic import BaseModel, Field
 import analytics
 import assignment
 import database
+import reports
 import scoring
 
 NAVY = "#0F2A44"
@@ -323,7 +325,7 @@ def dashboard_page():
             ui.notify(f"Report #{report['id']} saved: score {report['score']} ({report['level']})",
                       type="positive")
             add_dialog.close()
-            refresh()
+            refresh(force=True)
 
         with ui.row().classes("w-full justify-end"):
             ui.button("Cancel", on_click=add_dialog.close).props("flat")
@@ -376,7 +378,7 @@ def dashboard_page():
             ui.notify(problem, type="warning")
         else:
             ui.notify("Crew assigned", type="positive")
-        refresh()
+        refresh(force=True)
 
     # "Choose another" dialog: the supervisor overrides the suggestion
     with ui.dialog() as choose_dialog, ui.card().classes("w-96"):
@@ -415,23 +417,36 @@ def dashboard_page():
                          sum((r["restored_at"] or "").startswith(today) for r in reports), "green")
             summary_card("Open incidents", len(open_reports), "blue-grey-9")
 
-    @ui.refreshable
-    def priority_queue(reports):
-        # Open incidents only, highest score first (reports are already sorted by score)
+    def queue_rows(reports):
+        """One row per open incident (highest score first) with its suggested or assigned crew."""
         crews = database.get_crews()
         crew_by_id = {crew["id"]: crew for crew in crews}
         assigned_crew = {task["report_id"]: crew_by_id.get(task["crew_id"])
                          for task in database.get_assignments()}
         # Best crew for each unassigned incident (skill, distance and safeguards)
         suggestions = assignment.suggest_assignments(reports, crews)
+        return [{"report": report, "suggestion": suggestions.get(report["id"]),
+                 "crew": assigned_crew.get(report["id"])}
+                for report in reports if report["status"] != "Restored"]
 
+    def queue_signature(rows):
+        """Everything the queue shows, except the slowly rising scores."""
+        return [(row["report"]["id"], row["report"]["status"], row["report"]["level"],
+                 row["report"]["asset_type"], row["report"]["description"],
+                 row["suggestion"] and (row["suggestion"]["crew"]["id"], row["suggestion"]["crew"]["name"],
+                                        row["suggestion"]["distance_km"],
+                                        row["suggestion"]["crew"]["hours_worked"]),
+                 row["crew"] and row["crew"]["name"])
+                for row in rows]
+
+    @ui.refreshable
+    def priority_queue(rows):
         # minmax(0, 1fr) lets the text column shrink on phones so the Why? button stays visible
         with ui.grid(columns="44px 70px minmax(0, 1fr) 52px").classes("w-full items-center gap-x-2"):
             for heading in ("Score", "Level", "Incident", ""):
                 ui.label(heading).classes("text-bold text-grey-7")
-            for report in reports:
-                if report["status"] == "Restored":
-                    continue
+            for row in rows:
+                report, suggestion = row["report"], row["suggestion"]
                 ui.label(str(report["score"])).classes("text-bold")
                 ui.badge(report["level"], color=LEVEL_COLORS[report["level"]])
                 # overflow-wrap: anywhere breaks a very long word (e.g. a pasted link) instead of overflowing
@@ -439,7 +454,6 @@ def dashboard_page():
                     ui.label(f"{report['asset_type'].title()} - {report['status']}").classes("text-bold")
                     ui.label(report["description"]).classes("text-body2")
                     if report["status"] == "Reported":
-                        suggestion = suggestions.get(report["id"])
                         if suggestion:
                             crew = suggestion["crew"]
                             ui.label("Suggested crew: " + crew_line(crew, suggestion["distance_km"])) \
@@ -453,9 +467,8 @@ def dashboard_page():
                                     .props("dense size=sm")
                             ui.button("Choose another", on_click=lambda r=report: choose_another(r)) \
                                 .props("dense outline size=sm")
-                    elif assigned_crew.get(report["id"]):
-                        ui.label(f"Crew: {assigned_crew[report['id']]['name']}") \
-                            .classes("text-body2").style(f"color: {TEAL}")
+                    elif row["crew"]:
+                        ui.label(f"Crew: {row['crew']['name']}").classes("text-body2").style(f"color: {TEAL}")
                 ui.button("Why?", on_click=lambda r=report: show_why(r)).props("flat dense")
 
     # Markers now on the map: key -> (how it looks, map layer)
@@ -485,11 +498,20 @@ def dashboard_page():
                 layer.run_method("bindPopup", popup)  # clicking the marker shows the popup
                 markers[key] = (look, layer)
 
-    def refresh():
-        """Reload the reports and redraw the cards, the queue and the map."""
+    # What the queue showed when it was last drawn, and when that was
+    drawn = {"signature": None, "at": 0.0}
+
+    def refresh(force=False):
+        """Reload the reports and update the cards, the queue and the map."""
         reports = scored_reports()
+        rows = queue_rows(reports)
         summary_cards.refresh(reports)
-        priority_queue.refresh(reports)
+        # A click that lands while the queue is being redrawn is lost. So the queue is redrawn only
+        # when something in it changed, or once a minute to show the slowly rising scores.
+        signature = queue_signature(rows)
+        if force or signature != drawn["signature"] or time.monotonic() - drawn["at"] > 60:
+            drawn["signature"], drawn["at"] = signature, time.monotonic()
+            priority_queue.refresh(rows)
         update_map(reports)
 
     def map_ready():
@@ -502,17 +524,19 @@ def dashboard_page():
 
     with ui.row():
         ui.button("Add report", icon="add", on_click=open_add_form)
-        ui.button("Refresh", icon="refresh", on_click=refresh).props("outline")
+        ui.button("Refresh", icon="refresh", on_click=lambda: refresh(force=True)).props("outline")
 
     reports = scored_reports()
     summary_cards(reports)
+    rows = queue_rows(reports)
+    drawn["signature"], drawn["at"] = queue_signature(rows), time.monotonic()
 
     # Queue and map side by side on wide screens, map below the queue on phones
     with ui.element("div").classes("w-full grid grid-cols-1 lg:grid-cols-2 gap-4"):
         with ui.column().classes("w-full min-w-0"):
             ui.label("Priority queue").classes("text-h6")
             with ui.card().classes("w-full").style("max-height: 65vh; overflow-y: auto"):
-                priority_queue(reports)
+                priority_queue(rows)
         with ui.column().classes("w-full min-w-0"):
             ui.label("Live incident map").classes("text-h6")
             incident_map = ui.leaflet(center=VELLORE, zoom=12).classes("w-full").style("height: 65vh")
@@ -774,10 +798,75 @@ def analytics_page():
     ui.timer(10, content.refresh)
 
 
+def download_csv(text, name):
+    """Send CSV text to the browser as a file, e.g. resqmesh_incidents_2026-10-10.csv."""
+    filename = f"resqmesh_{name}_{database.now()[:10]}.csv"
+    # utf-8-sig lets Excel show ₹ and other non-English characters correctly
+    ui.download.content(text.encode("utf-8-sig"), filename, "text/csv")
+
+
 @ui.page("/reports")
 def reports_page():
     layout("Reports")
-    ui.label("Coming soon").classes("text-h5 text-grey")
+
+    # CSV export: each file is built from the database at the moment the button is clicked
+    ui.label("Export data").classes("text-h6")
+    with ui.row():
+        ui.button("Incidents CSV", icon="download",
+                  on_click=lambda: download_csv(reports.incidents_csv(), "incidents"))
+        ui.button("Crews CSV", icon="download",
+                  on_click=lambda: download_csv(reports.crews_csv(), "crews"))
+        ui.button("Assignments CSV", icon="download",
+                  on_click=lambda: download_csv(reports.assignments_csv(), "assignments"))
+    ui.label("Incidents include score, level and economic impact.").classes("text-caption text-grey-7")
+
+    @ui.refreshable
+    def summary_section():
+        summary = reports.daily_summary()
+        ui.label(f"Daily restoration summary - {summary['date']}").classes("text-h6 q-mt-md")
+
+        # Incidents by status, restored today and safety checklists
+        with ui.row():
+            for status, count in summary["by_status"].items():
+                summary_card(status, count, "blue-grey-9")
+            summary_card("Restored today", summary["restored_today"], "green")
+            summary_card("Safety checklists completed", summary["safety_checklists"], "teal")
+
+        ui.label("Top 5 by impact").classes("text-subtitle1 text-bold q-mt-md")
+        ui.table(
+            columns=[
+                {"name": "rank", "label": "#", "field": "rank", "align": "left"},
+                {"name": "asset", "label": "Asset", "field": "asset", "align": "left"},
+                {"name": "description", "label": "Description", "field": "description", "align": "left"},
+                {"name": "status", "label": "Status", "field": "status", "align": "left"},
+                {"name": "days_down", "label": "Days down", "field": "days_down"},
+                {"name": "impact", "label": "Impact (₹)", "field": "impact"},
+            ],
+            rows=[{"rank": rank, "asset": report["asset_type"].title(), "description": report["description"],
+                   "status": report["status"], "days_down": f"{report['days_down']:.2f}",
+                   "impact": rupees(report["impact"])}
+                  for rank, report in enumerate(summary["top5"], start=1)],
+            row_key="rank",
+        ).classes("w-full")
+
+        ui.label("Crew hours").classes("text-subtitle1 text-bold q-mt-md")
+        ui.table(
+            columns=[
+                {"name": "name", "label": "Crew", "field": "name", "align": "left"},
+                {"name": "skill", "label": "Skill", "field": "skill", "align": "left"},
+                {"name": "hours", "label": "Hours worked", "field": "hours"},
+                {"name": "warning", "label": "Warning", "field": "warning", "align": "left"},
+            ],
+            rows=[{**crew, "hours": f"{crew['hours_worked']:g} h"} for crew in summary["crew_hours"]],
+            row_key="id",
+        ).classes("w-full")
+
+    summary_section()
+    ui.button("Download summary CSV", icon="download",
+              on_click=lambda: download_csv(reports.summary_csv(), "daily_summary")).classes("q-mt-md")
+
+    # Keep the summary current while the page is open
+    ui.timer(10, summary_section.refresh)
 
 
 # Make sure the tables exist even if seed.py has not been run yet
