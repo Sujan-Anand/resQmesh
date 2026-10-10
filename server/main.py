@@ -7,11 +7,15 @@ from fastapi import HTTPException
 from nicegui import app, ui
 from pydantic import BaseModel, Field
 
+import assignment
 import database
 import scoring
 
 NAVY = "#0F2A44"
 TEAL = "#0B7A6F"
+
+SKILLS = ["electrical", "civil", "telecom", "plumbing"]
+CREW_STATUSES = ["Available", "Assigned", "On-site", "Off-duty"]
 
 # Colour for each priority level (used by the queue badges and the map markers)
 LEVEL_COLORS = {"Critical": "#C62828", "High": "#EF6C00", "Medium": "#F9A825", "Low": "#1976D2"}
@@ -69,6 +73,28 @@ def api_get_reports():
     return scored_reports()
 
 
+@app.get("/api/crews/{crew_id}")
+def api_get_crew(crew_id: int):
+    """Crew details for the phone app's My Shift screen."""
+    crew = database.get_crew(crew_id)
+    if crew is None:
+        raise HTTPException(404, f"No crew with id {crew_id}")
+    # warning is "" when the crew is fine; blocked is True at the 12 h shift limit
+    return {
+        **crew,
+        "warning": assignment.crew_warning(crew),
+        "blocked": crew["hours_worked"] >= assignment.SHIFT_LIMIT_HOURS,
+    }
+
+
+def shift_limit_problem(hours_worked, status):
+    """Safeguard: a crew at the shift limit cannot be put to work. Returns the reason, or ""."""
+    if hours_worked >= assignment.SHIFT_LIMIT_HOURS and status in ("Assigned", "On-site"):
+        return (f"Blocked: this crew has worked {hours_worked:g} h (shift limit "
+                f"{assignment.SHIFT_LIMIT_HOURS} h). Reset hours for a new shift first.")
+    return ""
+
+
 # ---------- Shared layout ----------
 
 def layout(title):
@@ -86,15 +112,6 @@ def layout(title):
                     ui.label(label).classes("text-subtitle1")
 
     ui.label(title).classes("text-h4 text-bold").style(f"color: {NAVY}")
-
-
-def columns(*names):
-    """Build simple sortable table columns from field names."""
-    return [
-        {"name": name, "label": name.replace("_", " ").title(), "field": name,
-         "sortable": True, "align": "left"}
-        for name in names
-    ]
 
 
 def summary_card(title, value, color):
@@ -120,7 +137,10 @@ def crew_marker(crew):
     """How one crew looks on the map: a smaller navy dot."""
     popup = (f"<b>Crew: {escape(crew['name'])}</b>"
              f"<br>{escape(crew['skill'])} - {escape(crew['status'])}"
-             f"<br>{crew['hours_worked']} h worked")
+             f"<br>{crew['hours_worked']:g} h worked")
+    warning = assignment.crew_warning(crew)
+    if warning:
+        popup += f"<br><b>{warning}</b>"
     return (crew["lat"], crew["lng"], NAVY, 5, popup)
 
 
@@ -304,11 +324,143 @@ def dashboard_page():
 @ui.page("/crews")
 def crews_page():
     layout("Crews")
-    ui.table(
-        columns=columns("id", "name", "skill", "status", "hours_worked", "lat", "lng"),
-        rows=database.get_crews(),
-        row_key="id",
-    ).classes("w-full")
+
+    # Which crew the form is editing; None means the form is adding a new crew
+    editing = {"id": None}
+
+    # One form for both "Add crew" and "Edit crew"
+    with ui.dialog() as crew_dialog, ui.card().classes("w-96"):
+        form_title = ui.label().classes("text-h6")
+        name = ui.input("Crew name").classes("w-full")
+        skill = ui.select(SKILLS, value=SKILLS[0], label="Skill").classes("w-full")
+        status = ui.select(CREW_STATUSES, value="Available", label="Status").classes("w-full")
+        with ui.row().classes("w-full no-wrap"):
+            lat = ui.number("Latitude", value=VELLORE[0], format="%.4f").classes("w-1/2")
+            lng = ui.number("Longitude", value=VELLORE[1], format="%.4f").classes("w-1/2")
+        hours = ui.number("Hours worked this shift", value=0, min=0, step=0.5).classes("w-full")
+
+        def save():
+            crew_name = (name.value or "").strip()
+            hours_worked = float(hours.value or 0)
+            if not crew_name:
+                ui.notify("Please enter a crew name", type="warning")
+                return
+            if lat.value is None or lng.value is None:
+                ui.notify("Please enter latitude and longitude", type="warning")
+                return
+            if not (-90 <= lat.value <= 90 and -180 <= lng.value <= 180):
+                ui.notify("Latitude must be -90 to 90 and longitude -180 to 180", type="warning")
+                return
+            if not 0 <= hours_worked <= 24:
+                ui.notify("Hours worked must be between 0 and 24", type="warning")
+                return
+            problem = shift_limit_problem(hours_worked, status.value)
+            if problem:
+                ui.notify(problem, type="warning")
+                return
+
+            fields = {"name": crew_name, "skill": skill.value, "status": status.value,
+                      "lat": lat.value, "lng": lng.value, "hours_worked": hours_worked}
+            if editing["id"] is None:
+                database.add_crew(**fields)
+                ui.notify(f"Crew {crew_name} added", type="positive")
+            else:
+                database.update_crew(editing["id"], **fields)
+                ui.notify(f"Crew {crew_name} updated", type="positive")
+            crew_dialog.close()
+            crew_table.refresh()
+
+        with ui.row().classes("w-full justify-end"):
+            ui.button("Cancel", on_click=crew_dialog.close).props("flat")
+            ui.button("Save crew", on_click=save)
+
+    def find_crew(crew_id):
+        """Load a crew for a button click. If it no longer exists, say so and redraw the table."""
+        crew = database.get_crew(crew_id)
+        if crew is None:
+            ui.notify("This crew no longer exists - the list has been refreshed", type="warning")
+            crew_table.refresh()
+        return crew
+
+    def open_form(crew_id=None):
+        """Open the form empty (add) or filled with one crew's details (edit)."""
+        crew = find_crew(crew_id) if crew_id else None
+        if crew_id and crew is None:
+            return
+        editing["id"] = crew["id"] if crew else None
+        form_title.text = "Edit crew" if crew else "Add crew"
+        name.value = crew["name"] if crew else ""
+        skill.value = crew["skill"] if crew else SKILLS[0]
+        status.value = crew["status"] if crew else "Available"
+        lat.value = crew["lat"] if crew else VELLORE[0]
+        lng.value = crew["lng"] if crew else VELLORE[1]
+        hours.value = crew["hours_worked"] if crew else 0
+        crew_dialog.open()
+
+    def change_status(crew_id, new_status):
+        crew = find_crew(crew_id)
+        if crew is None:
+            return
+        # Safeguard: a crew at the 12 h shift limit cannot be set to Assigned or On-site
+        problem = shift_limit_problem(crew["hours_worked"], new_status)
+        if problem:
+            ui.notify(problem, type="warning")
+        else:
+            database.update_crew(crew_id, status=new_status)
+            ui.notify(f"{crew['name']} is now {new_status}", type="positive")
+        crew_table.refresh()  # also puts the dropdown back if the change was refused
+
+    def reset_hours(crew_id):
+        crew = find_crew(crew_id)
+        if crew is None:
+            return
+        database.update_crew(crew_id, hours_worked=0)
+        ui.notify(f"Hours reset for {crew['name']} (new shift)", type="positive")
+        crew_table.refresh()
+
+    ui.button("Add crew", icon="add", on_click=lambda: open_form())
+
+    # The crews as last drawn, so the page only redraws when something really changed
+    shown = {"crews": None}
+
+    @ui.refreshable
+    def crew_table():
+        crews = database.get_crews()
+        shown["crews"] = crews
+        # The card scrolls sideways on narrow screens instead of squashing the columns
+        with ui.card().classes("w-full").style("overflow-x: auto"):
+            with ui.grid(columns="minmax(130px, 1.3fr) 90px 140px minmax(210px, 1.2fr) 125px 150px") \
+                    .classes("w-full items-center gap-x-4").style("min-width: 920px"):
+                for heading in ("Name", "Skill", "Status", "Hours worked", "Location", ""):
+                    ui.label(heading).classes("text-bold text-grey-7")
+                for crew in crews:
+                    ui.label(crew["name"]).classes("text-bold")
+                    ui.label(crew["skill"].title())
+                    ui.select(CREW_STATUSES, value=crew["status"],
+                              on_change=lambda e, c=crew: change_status(c["id"], e.value)) \
+                        .props("dense outlined").classes("w-full")
+                    with ui.row().classes("items-center gap-2 no-wrap"):
+                        ui.label(f"{crew['hours_worked']:g} h")
+                        # Decent-work warning chip: fatigue at 10 h, blocked at 12 h
+                        warning = assignment.crew_warning(crew)
+                        if warning:
+                            blocked = crew["hours_worked"] >= assignment.SHIFT_LIMIT_HOURS
+                            ui.chip(warning, icon="block" if blocked else "warning",
+                                    color="red" if blocked else "orange", text_color="white").props("dense")
+                    ui.label(f"{crew['lat']:.4f}, {crew['lng']:.4f}")
+                    with ui.row().classes("gap-1 no-wrap"):
+                        ui.button("Edit", on_click=lambda c=crew: open_form(c["id"])).props("flat dense")
+                        ui.button("Reset hours", on_click=lambda c=crew: reset_hours(c["id"])).props("flat dense")
+
+    crew_table()
+
+    def refresh_if_changed():
+        # Pick up changes made elsewhere (another browser, the phone app) without
+        # redrawing every time, which would close a dropdown the supervisor has open
+        if database.get_crews() != shown["crews"]:
+            crew_table.refresh()
+
+    ui.timer(10, refresh_if_changed)
 
 
 @ui.page("/analytics")

@@ -126,6 +126,12 @@ def get_crews():
     return fetch("SELECT * FROM crews ORDER BY id")
 
 
+def get_crew(crew_id):
+    """One crew as a dict, or None if there is no crew with this id."""
+    rows = fetch("SELECT * FROM crews WHERE id = ?", (crew_id,))
+    return rows[0] if rows else None
+
+
 def update_crew(crew_id, **changes):
     """Change crew fields, e.g. update_crew(3, status="Assigned", hours_worked=9.5)."""
     for column in changes:
