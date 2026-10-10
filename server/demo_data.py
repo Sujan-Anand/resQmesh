@@ -67,6 +67,10 @@ DEMO_REPORTS = [
     {"asset_type": "hospital", "lat": 12.8580, "lng": 79.1340, "severity": 3, "hours_ago": 3,
      "description": "Government hospital at Adukkamparai: ground floor ward and lift flooded",
      "people_affected": 1400, "businesses_affected": 5, "workers_affected": 350},
+    # Added from the web form during testing (it was saved without a description)
+    {"asset_type": "hospital", "lat": 12.973869, "lng": 79.1636, "severity": 5, "hours_ago": 0.25,
+     "description": "",
+     "people_affected": 1000, "businesses_affected": 0, "workers_affected": 100},
 
     # --- Industry ---
     {"asset_type": "industry", "lat": 12.9770, "lng": 79.1380, "severity": 4, "hours_ago": 6.5,
