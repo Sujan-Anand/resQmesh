@@ -103,6 +103,12 @@ def get_reports():
     return fetch("SELECT * FROM reports ORDER BY created_at DESC, id DESC")
 
 
+def get_report(report_id):
+    """One report as a dict, or None if there is no report with this id."""
+    rows = fetch("SELECT * FROM reports WHERE id = ?", (report_id,))
+    return rows[0] if rows else None
+
+
 def update_report_status(report_id, status):
     """Move a report along: Reported -> Assigned -> In Progress -> Restored."""
     # Remember when it was restored (used by the analytics and daily summary)

@@ -1,5 +1,6 @@
 """ResQMesh web dashboard + REST API (NiceGUI). Run from the resqmesh folder:   py server/main.py"""
 
+from datetime import datetime
 from html import escape
 from pathlib import Path
 
@@ -87,6 +88,106 @@ def api_get_crew(crew_id: int):
     }
 
 
+def crews_on_a_job():
+    """Ids of the crews that have an open task (assigned or in progress)."""
+    open_reports = {report["id"] for report in database.get_reports()
+                    if report["status"] in ("Assigned", "In Progress")}
+    return {task["crew_id"] for task in database.get_assignments() if task["report_id"] in open_reports}
+
+
+def on_a_job_problem(crew, new_status):
+    """A crew that is on a job cannot be marked free by hand. Returns the reason, or ""."""
+    if new_status in ("Available", "Off-duty") and crew["id"] in crews_on_a_job():
+        return (f"{crew['name']} is on a job. Its status changes by itself "
+                f"when the job is started or restored.")
+    return ""
+
+
+def assign_crew(report_id, crew_id, safety_checked):
+    """Save a crew assignment. Returns "" when saved, or the reason it was refused."""
+    report = database.get_report(report_id)
+    crew = database.get_crew(crew_id)
+    if report is None or crew is None:
+        return "This incident or crew no longer exists"
+    if report["status"] != "Reported":
+        return "This incident is already assigned"
+    # Safeguards: never assign a blocked crew, a busy crew or the wrong skill
+    if assignment.is_blocked(crew):
+        return f"{crew['name']} is blocked by the shift-hour safeguard"
+    if crew["status"] != "Available" or crew_id in crews_on_a_job():
+        return f"{crew['name']} is no longer available"
+    if crew["skill"] != assignment.skill_for(report["asset_type"]):
+        return f"{crew['name']} does not have the skill for {report['asset_type']} work"
+    # Hazardous jobs are saved only when the safety checklist was completed
+    if report["asset_type"] in assignment.HAZARDOUS and not safety_checked:
+        return "The safety checklist must be completed for this job"
+
+    database.add_assignment(report_id, crew_id, safety_checked)
+    database.update_report_status(report_id, "Assigned")
+    database.update_crew(crew_id, status="Assigned")
+    return ""
+
+
+class TaskStatus(BaseModel):
+    """What the phone app sends when a crew updates a task."""
+    status: str  # "In Progress" or "Restored"
+
+
+@app.get("/api/tasks/{crew_id}")
+def api_get_tasks(crew_id: int):
+    """Open incidents assigned to a crew, for the phone app's My Tasks screen."""
+    if database.get_crew(crew_id) is None:
+        raise HTTPException(404, f"No crew with id {crew_id}")
+    reports = {report["id"]: report for report in scored_reports()}
+    tasks = []
+    for task in database.get_assignments():
+        report = reports.get(task["report_id"])
+        if task["crew_id"] == crew_id and report and report["status"] in ("Assigned", "In Progress"):
+            tasks.append({**report, "assigned_at": task["assigned_at"],
+                          "safety_checked": bool(task["safety_checked"])})
+    return sorted(tasks, key=lambda task: task["score"], reverse=True)
+
+
+@app.post("/api/tasks/{report_id}/status")
+def api_set_task_status(report_id: int, update: TaskStatus):
+    """A crew moves its task on: Assigned -> In Progress -> Restored."""
+    statuses = {"in progress": "In Progress", "restored": "Restored"}
+    new_status = statuses.get(update.status.strip().lower())
+    if new_status is None:
+        raise HTTPException(400, "status must be In Progress or Restored")
+    report = database.get_report(report_id)
+    if report is None:
+        raise HTTPException(404, f"No report with id {report_id}")
+    task = next((t for t in database.get_assignments() if t["report_id"] == report_id), None)
+    if task is None:
+        raise HTTPException(400, "This incident has not been assigned to a crew")
+    crew = database.get_crew(task["crew_id"])
+
+    # Sending the same status again (a retry on bad Wi-Fi) changes nothing
+    if new_status != report["status"]:
+        allowed_from = {"In Progress": ("Assigned",), "Restored": ("Assigned", "In Progress")}
+        if report["status"] not in allowed_from[new_status]:
+            raise HTTPException(400, f"Cannot change this incident from {report['status']} to {new_status}")
+        database.update_report_status(report_id, new_status)  # Restored also sets restored_at
+        if crew and new_status == "In Progress":
+            database.update_crew(crew["id"], status="On-site")
+        elif crew:
+            # Restored: free the crew and add the hours spent on this job to its shift hours
+            assigned = datetime.strptime(task["assigned_at"], database.TIME_FORMAT)
+            hours_spent = max((datetime.now() - assigned).total_seconds() / 3600, 0)
+            database.update_crew(crew["id"], status="Available",
+                                 hours_worked=round(crew["hours_worked"] + hours_spent, 2))
+            crew = database.get_crew(crew["id"])
+
+    return {
+        "report_id": report_id,
+        "status": new_status,
+        "crew_id": task["crew_id"],
+        "hours_worked": crew["hours_worked"] if crew else None,
+        "warning": assignment.crew_warning(crew) if crew else "",
+    }
+
+
 def shift_limit_problem(hours_worked, status):
     """Safeguard: a crew at the shift limit cannot be put to work. Returns the reason, or ""."""
     if hours_worked >= assignment.SHIFT_LIMIT_HOURS and status in ("Assigned", "On-site"):
@@ -142,6 +243,17 @@ def crew_marker(crew):
     if warning:
         popup += f"<br><b>{warning}</b>"
     return (crew["lat"], crew["lng"], NAVY, 5, popup)
+
+
+def crew_line(crew, km):
+    """One line describing a crew for an incident: name · skill · distance km · hours."""
+    return f"{crew['name']} · {crew['skill']} · {km} km · {crew['hours_worked']:g} h"
+
+
+def fatigue_chip(crew):
+    """Show the orange fatigue chip when the crew has worked 10 h or more."""
+    if assignment.fatigue_warning(crew):
+        ui.chip("Fatigue warning", icon="warning", color="orange", text_color="white").props("dense")
 
 
 def legend_dot(color, label, size=14):
@@ -224,6 +336,71 @@ def dashboard_page():
         workers.value = 0
         add_dialog.open()
 
+    # Safety checklist dialog: hazardous jobs (power, bridge, hospital) are assigned
+    # only after all three boxes are ticked
+    pending = {"report_id": None, "crew_id": None}  # the assignment waiting for the checklist
+    with ui.dialog() as safety_dialog, ui.card().classes("w-96"):
+        ui.label("Safety checklist").classes("text-h6")
+        safety_text = ui.label().classes("text-body2")
+        safety_boxes = [ui.checkbox(item) for item in assignment.SAFETY_CHECKLIST]
+
+        def confirm_safety():
+            if not all(box.value for box in safety_boxes):
+                ui.notify("Tick all 3 safety checks before assigning", type="warning")
+                return
+            safety_dialog.close()
+            finish_assign(pending["report_id"], pending["crew_id"], safety_checked=True)
+
+        with ui.row().classes("w-full justify-end"):
+            ui.button("Cancel", on_click=safety_dialog.close).props("flat")
+            ui.button("Confirm and assign", on_click=confirm_safety)
+
+    def start_assign(report, crew):
+        """Assign button: hazardous jobs go through the safety checklist first."""
+        if report["asset_type"] in assignment.HAZARDOUS:
+            pending["report_id"], pending["crew_id"] = report["id"], crew["id"]
+            safety_text.text = (f"{report['asset_type'].title()} work is hazardous. Tick all three checks "
+                                f"to assign {crew['name']}.")
+            for box in safety_boxes:
+                box.value = False
+            safety_dialog.open()
+        else:
+            finish_assign(report["id"], crew["id"], safety_checked=False)
+
+    def finish_assign(report_id, crew_id, safety_checked):
+        problem = assign_crew(report_id, crew_id, safety_checked)
+        if problem:
+            ui.notify(problem, type="warning")
+        else:
+            ui.notify("Crew assigned", type="positive")
+        refresh()
+
+    # "Choose another" dialog: the supervisor overrides the suggestion
+    with ui.dialog() as choose_dialog, ui.card().classes("w-96"):
+        choose_content = ui.column().classes("w-full")
+
+    def choose_another(report):
+        options = assignment.eligible_crews(report, database.get_crews())
+        choose_content.clear()
+        with choose_content:
+            ui.label("Choose a crew").classes("text-h6")
+            ui.label(f"#{report['id']} {report['asset_type']} - needs "
+                     f"{assignment.skill_for(report['asset_type'])} skill").classes("text-caption")
+            if not options:
+                ui.label("No free crew with this skill right now.").classes("q-mt-sm")
+            for option in options:
+                with ui.row().classes("w-full items-center justify-between no-wrap q-mt-sm"):
+                    with ui.column().classes("gap-0"):
+                        ui.label(crew_line(option["crew"], option["distance_km"])).classes("text-body2")
+                        fatigue_chip(option["crew"])
+                    ui.button("Assign", on_click=lambda o=option: choose(report, o["crew"])).props("dense")
+            ui.button("Cancel", on_click=choose_dialog.close).props("flat").classes("q-mt-md self-end")
+        choose_dialog.open()
+
+    def choose(report, crew):
+        choose_dialog.close()
+        start_assign(report, crew)
+
     @ui.refreshable
     def summary_cards(reports):
         open_reports = [r for r in reports if r["status"] != "Restored"]
@@ -238,6 +415,13 @@ def dashboard_page():
     @ui.refreshable
     def priority_queue(reports):
         # Open incidents only, highest score first (reports are already sorted by score)
+        crews = database.get_crews()
+        crew_by_id = {crew["id"]: crew for crew in crews}
+        assigned_crew = {task["report_id"]: crew_by_id.get(task["crew_id"])
+                         for task in database.get_assignments()}
+        # Best crew for each unassigned incident (skill, distance and safeguards)
+        suggestions = assignment.suggest_assignments(reports, crews)
+
         # minmax(0, 1fr) lets the text column shrink on phones so the Why? button stays visible
         with ui.grid(columns="44px 70px minmax(0, 1fr) 52px").classes("w-full items-center gap-x-2"):
             for heading in ("Score", "Level", "Incident", ""):
@@ -250,6 +434,24 @@ def dashboard_page():
                 with ui.column().classes("gap-0 w-full break-words"):
                     ui.label(f"{report['asset_type'].title()} - {report['status']}").classes("text-bold")
                     ui.label(report["description"]).classes("text-body2")
+                    if report["status"] == "Reported":
+                        suggestion = suggestions.get(report["id"])
+                        if suggestion:
+                            crew = suggestion["crew"]
+                            ui.label("Suggested crew: " + crew_line(crew, suggestion["distance_km"])) \
+                                .classes("text-body2").style(f"color: {TEAL}")
+                            fatigue_chip(crew)
+                        else:
+                            ui.label("Suggested crew: none free right now").classes("text-body2 text-grey-7")
+                        with ui.row().classes("gap-2 q-mt-xs"):
+                            if suggestion:
+                                ui.button("Assign", on_click=lambda r=report, c=crew: start_assign(r, c)) \
+                                    .props("dense size=sm")
+                            ui.button("Choose another", on_click=lambda r=report: choose_another(r)) \
+                                .props("dense outline size=sm")
+                    elif assigned_crew.get(report["id"]):
+                        ui.label(f"Crew: {assigned_crew[report['id']]['name']}") \
+                            .classes("text-body2").style(f"color: {TEAL}")
                 ui.button("Why?", on_click=lambda r=report: show_why(r)).props("flat dense")
 
     # Markers now on the map: key -> (how it looks, map layer)
@@ -355,6 +557,8 @@ def crews_page():
                 ui.notify("Hours worked must be between 0 and 24", type="warning")
                 return
             problem = shift_limit_problem(hours_worked, status.value)
+            if not problem and editing["id"] is not None:
+                problem = on_a_job_problem({"id": editing["id"], "name": crew_name}, status.value)
             if problem:
                 ui.notify(problem, type="warning")
                 return
@@ -401,8 +605,9 @@ def crews_page():
         crew = find_crew(crew_id)
         if crew is None:
             return
-        # Safeguard: a crew at the 12 h shift limit cannot be set to Assigned or On-site
-        problem = shift_limit_problem(crew["hours_worked"], new_status)
+        # Safeguard: a crew at the 12 h shift limit cannot be set to Assigned or On-site,
+        # and a crew that is on a job cannot be marked free by hand
+        problem = shift_limit_problem(crew["hours_worked"], new_status) or on_a_job_problem(crew, new_status)
         if problem:
             ui.notify(problem, type="warning")
         else:
