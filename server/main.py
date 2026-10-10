@@ -39,8 +39,8 @@ def save_report(**fields):
 class NewReport(BaseModel):
     """Fields the phone app sends for a new damage report."""
     asset_type: str
-    lat: float
-    lng: float
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
     severity: int = Field(ge=1, le=5)
     description: str = ""
     people_affected: int = Field(default=0, ge=0)
@@ -50,6 +50,8 @@ class NewReport(BaseModel):
 
 @app.post("/api/reports")
 def api_add_report(new_report: NewReport):
+    # Accept "Power" or " power " from the phone as well as "power"
+    new_report.asset_type = new_report.asset_type.strip().lower()
     if new_report.asset_type not in scoring.CRITICALITY:
         raise HTTPException(400, f"asset_type must be one of: {', '.join(scoring.CRITICALITY)}")
     report = save_report(**new_report.model_dump())
@@ -138,6 +140,9 @@ def dashboard_page():
             if lat.value is None or lng.value is None:
                 ui.notify("Please enter latitude and longitude", type="warning")
                 return
+            if not (-90 <= lat.value <= 90 and -180 <= lng.value <= 180):
+                ui.notify("Latitude must be -90 to 90 and longitude -180 to 180", type="warning")
+                return
             report = save_report(
                 asset_type=asset_type.value, lat=lat.value, lng=lng.value,
                 severity=severity.value, description=description.value or "",
@@ -147,7 +152,6 @@ def dashboard_page():
             )
             ui.notify(f"Report #{report['id']} saved: score {report['score']} ({report['level']})",
                       type="positive")
-            description.value = ""
             add_dialog.close()
             content.refresh()
 
@@ -155,8 +159,18 @@ def dashboard_page():
             ui.button("Cancel", on_click=add_dialog.close).props("flat")
             ui.button("Save report", on_click=submit)
 
+    def open_add_form():
+        # Start each new report with a clean form (asset type and location are kept,
+        # because a supervisor often enters several reports from the same area)
+        severity.value = 3
+        description.value = ""
+        people.value = 0
+        businesses.value = 0
+        workers.value = 0
+        add_dialog.open()
+
     with ui.row():
-        ui.button("Add report", icon="add", on_click=add_dialog.open)
+        ui.button("Add report", icon="add", on_click=open_add_form)
         ui.button("Refresh", icon="refresh", on_click=lambda: content.refresh()).props("outline")
 
     @ui.refreshable
@@ -217,5 +231,6 @@ def reports_page():
 database.init_db()
 
 # host 0.0.0.0 lets phones on the same Wi-Fi reach the server
+# fastapi_docs=True turns on http://localhost:8080/docs for trying the API
 if __name__ in {"__main__", "__mp_main__"}:
-    ui.run(host="0.0.0.0", port=8080, title="ResQMesh", show=False)
+    ui.run(host="0.0.0.0", port=8080, title="ResQMesh", show=False, fastapi_docs=True)
