@@ -79,6 +79,12 @@ def api_get_reports():
     return scored_reports()
 
 
+@app.get("/api/mode")
+def api_get_mode():
+    """Lets the phone app show a small DEMO label. The whole API follows the Demo mode switch."""
+    return {"demo": database.demo_mode()}
+
+
 @app.get("/api/crews/{crew_id}")
 def api_get_crew(crew_id: int):
     """Crew details for the phone app's My Shift screen."""
@@ -208,6 +214,30 @@ def layout(title):
     # "primary" is the colour NiceGUI uses for buttons, so all buttons become teal
     ui.colors(primary=TEAL)
 
+    demo = database.demo_mode()  # the mode this page was drawn in
+
+    def switch_mode(on):
+        """Demo mode switch: change which database file is used, then redraw this page."""
+        if on:
+            seed.ensure_demo_database()  # create resqmesh_demo.db from demo_data.py if it is missing
+        database.set_demo_mode(on)
+        ui.navigate.reload()
+
+    # Demo reset: asks first. It only ever reloads resqmesh_demo.db, never the real database.
+    with ui.dialog() as reset_dialog, ui.card().classes("w-96"):
+        ui.label("Reset demo data?").classes("text-h6")
+        ui.label("This deletes every demo report, crew and assignment and loads the demo data again. "
+                 "Real data is not touched.").classes("text-body2")
+
+        def reset_demo():
+            seed.reset_demo_data()
+            reset_dialog.close()
+            ui.navigate.reload()  # redraw the whole page from the fresh data
+
+        with ui.row().classes("w-full justify-end"):
+            ui.button("Cancel", on_click=reset_dialog.close).props("flat")
+            ui.button("Reset demo data", on_click=reset_demo)
+
     with ui.left_drawer(fixed=True).props("width=220").style(f"background-color: {NAVY}") as drawer:
         ui.label("ResQMesh").classes("text-white text-h5 text-bold")
         ui.label("Restore what matters first").classes("text-white text-caption q-mb-md")
@@ -217,10 +247,34 @@ def layout(title):
                     ui.icon(icon)
                     ui.label(label).classes("text-subtitle1")
 
+        # Demo mode: ON uses resqmesh_demo.db, OFF uses resqmesh.db (real data)
+        ui.separator().props("dark").classes("q-my-md")
+        ui.switch("Demo mode", value=demo, on_change=lambda e: switch_mode(e.value)) \
+            .props("color=orange dark").classes("text-white")
+        if demo:
+            ui.button("Reset demo data", icon="restart_alt", on_click=reset_dialog.open) \
+                .props("outline dense color=white")
+
     with ui.row().classes("items-center"):
         # On phones the sidebar is hidden; this button (shown only on narrow screens) opens it
         ui.button("Menu", icon="menu", on_click=drawer.toggle).props("outline dense").classes("lt-md")
         ui.label(title).classes("text-h4 text-bold").style(f"color: {NAVY}")
+        if demo:
+            ui.badge("DEMO DATA", color=LEVEL_COLORS["High"], text_color="white").classes("text-bold q-pa-xs")
+
+    def reload_if_mode_changed():
+        # Someone switched Demo mode in another browser: redraw so this page shows the right data and badge
+        if database.demo_mode() != demo:
+            ui.navigate.reload()
+
+    ui.timer(5, reload_if_mode_changed)
+
+
+def no_incidents_message():
+    """Friendly message shown instead of an empty incident table."""
+    # "yet" only when nothing has been reported at all (e.g. the real database on its first day)
+    text = "No open incidents - everything is restored." if database.get_reports() else "No incidents yet."
+    ui.label(text).classes("text-subtitle1 text-grey-7 q-pa-md")
 
 
 def summary_card(title, value, color=NAVY):
@@ -446,6 +500,9 @@ def dashboard_page():
 
     @ui.refreshable
     def priority_queue(rows):
+        if not rows:
+            no_incidents_message()
+            return
         # minmax(0, 1fr) lets the text column shrink on phones so the Why? button stays visible
         with ui.grid(columns="44px 70px minmax(0, 1fr) 52px").classes("w-full items-center gap-x-2"):
             for heading in ("Score", "Level", "Incident", ""):
@@ -527,29 +584,9 @@ def dashboard_page():
         markers.clear()
         update_map(scored_reports())
 
-    # Demo reset: asks first, because it deletes everything
-    with ui.dialog() as reset_dialog, ui.card().classes("w-96"):
-        ui.label("Reset demo data?").classes("text-h6")
-        ui.label("This deletes every report, crew and assignment and loads the demo data again.") \
-            .classes("text-body2")
-
-        def reset_demo():
-            seed.reset_demo_data()
-            reset_dialog.close()
-            ui.navigate.reload()  # redraw the whole page from the fresh data
-
-        with ui.row().classes("w-full justify-end"):
-            ui.button("Cancel", on_click=reset_dialog.close).props("flat")
-            ui.button("Reset demo data", on_click=reset_demo)
-
     with ui.row().classes("items-center"):
         ui.button("Add report", icon="add", on_click=open_add_form)
         ui.button("Refresh", icon="refresh", on_click=lambda: refresh(force=True)).props("outline")
-        with ui.button("Demo", icon="arrow_drop_down").props("outline"):
-            with ui.menu():
-                ui.menu_item("Reset demo data", on_click=reset_dialog.open)
-        if seed.demo_data_loaded():
-            ui.badge("DEMO DATA", color=LEVEL_COLORS["Medium"], text_color="black").classes("text-bold q-pa-xs")
 
     reports = scored_reports()
     summary_cards(reports)
@@ -685,6 +722,9 @@ def crews_page():
     def crew_table():
         crews = database.get_crews()
         shown["crews"] = crews
+        if not crews:
+            ui.label('No crews yet. Use "Add crew" to register one.').classes("text-subtitle1 text-grey-7 q-pa-md")
+            return
         # The card scrolls sideways on narrow screens instead of squashing the columns
         with ui.card().classes("w-full").style("overflow-x: auto"):
             with ui.grid(columns="minmax(130px, 1.3fr) 90px 140px minmax(210px, 1.2fr) 125px 150px") \
@@ -777,7 +817,9 @@ def analytics_page():
                 {"name": "status", "label": "Status", "field": "status", "align": "left"},
             ],
             rows=rows, row_key="rank",
-        ).classes("w-full")
+        ).classes("w-full").set_visibility(bool(rows))
+        if not rows:
+            no_incidents_message()  # friendly message instead of an empty table
 
         # Bar chart: one bar per asset type
         ui.label("Impact by asset type").classes("text-h6 q-mt-md")
@@ -873,7 +915,9 @@ def reports_page():
                    "impact": rupees(report["impact"])}
                   for rank, report in enumerate(summary["top5"], start=1)],
             row_key="rank",
-        ).classes("w-full")
+        ).classes("w-full").set_visibility(bool(summary["top5"]))
+        if not summary["top5"]:
+            ui.label("No incidents yet.").classes("text-subtitle1 text-grey-7 q-pa-md")
 
         ui.label("Crew hours").classes("text-subtitle1 text-bold q-mt-md")
         ui.table(
@@ -895,7 +939,10 @@ def reports_page():
     ui.timer(10, summary_section.refresh)
 
 
-# Make sure the tables exist even if seed.py has not been run yet
+# Make sure the database in use is ready: in Demo mode create resqmesh_demo.db from
+# demo_data.py if it is missing; in real mode just make sure the tables exist
+if database.demo_mode():
+    seed.ensure_demo_database()
 database.init_db()
 
 # host 0.0.0.0 lets phones on the same Wi-Fi reach the server

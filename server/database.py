@@ -1,12 +1,16 @@
 """SQLite database for ResQMesh: reports, crews and assignments."""
 
+import json
 import sqlite3
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
-# The database file sits next to this file, in the server folder
-DB_PATH = Path(__file__).parent / "resqmesh.db"
+# Two separate database files sit next to this file, in the server folder.
+# Demo mode only chooses which one the app reads and writes, so real data is never deleted by it.
+REAL_DB = Path(__file__).parent / "resqmesh.db"       # real data
+DEMO_DB = Path(__file__).parent / "resqmesh_demo.db"  # demo data
+SETTINGS_PATH = Path(__file__).parent / "settings.json"  # remembers the Demo mode choice
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -14,36 +18,61 @@ TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 CREW_COLUMNS = ("name", "skill", "lat", "lng", "status", "hours_worked")
 
 
+def saved_demo_mode():
+    """Read the Demo mode choice from settings.json. Default: ON."""
+    try:
+        return bool(json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))["demo_mode"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return True  # no settings file yet (or it is unreadable): start in Demo mode
+
+
+# The database file in use right now
+DB_PATH = DEMO_DB if saved_demo_mode() else REAL_DB
+
+
+def demo_mode():
+    """True when the app is using the demo database."""
+    return DB_PATH == DEMO_DB
+
+
+def set_demo_mode(on):
+    """Switch between the demo and the real database, and remember the choice."""
+    global DB_PATH
+    DB_PATH = DEMO_DB if on else REAL_DB
+    SETTINGS_PATH.write_text(json.dumps({"demo_mode": bool(on)}, indent=2) + "\n", encoding="utf-8")
+    init_db()  # make sure the tables exist in the file now in use
+
+
 def now():
     """Current local time as text, e.g. 2026-10-10 14:30:00."""
     return datetime.now().strftime(TIME_FORMAT)
 
 
-def connect():
-    """Open a connection. Rows come back so they can be turned into dicts."""
-    conn = sqlite3.connect(DB_PATH)
+def connect(path=None):
+    """Open a connection to the database in use (or to `path`). Rows can be turned into dicts."""
+    conn = sqlite3.connect(path or DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 
-def run(sql, params=()):
+def run(sql, params=(), path=None):
     """Run an INSERT/UPDATE/DELETE, save it, and return the new row id."""
     # closing() makes sure the connection is closed (important on OneDrive)
-    with closing(connect()) as conn:
+    with closing(connect(path)) as conn:
         cursor = conn.execute(sql, params)
         conn.commit()
         return cursor.lastrowid
 
 
-def fetch(sql, params=()):
+def fetch(sql, params=(), path=None):
     """Run a SELECT and return the rows as a list of dicts."""
-    with closing(connect()) as conn:
+    with closing(connect(path)) as conn:
         return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
 
-def init_db():
+def init_db(path=None):
     """Create the three tables if they do not exist yet."""
-    with closing(connect()) as conn:
+    with closing(connect(path)) as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS reports (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,9 +110,12 @@ def init_db():
         conn.commit()
 
 
-def clear_all():
-    """Delete every report, crew and assignment, and start their ids again from 1."""
-    with closing(connect()) as conn:
+def clear_all(path):
+    """Delete every report, crew and assignment in `path`, and start their ids again from 1."""
+    # Safety: the real database can never be emptied by this function
+    if Path(path).resolve() == REAL_DB.resolve():
+        raise ValueError("Refusing to clear the real database")
+    with closing(connect(path)) as conn:
         conn.executescript("""
             DELETE FROM assignments;
             DELETE FROM reports;
@@ -97,7 +129,7 @@ def clear_all():
 
 def add_report(asset_type, lat, lng, severity, description="",
                people_affected=0, businesses_affected=0, workers_affected=0,
-               status="Reported", created_at=None):
+               status="Reported", created_at=None, path=None):
     """Save a new damage report and return its id."""
     return run(
         """INSERT INTO reports (asset_type, lat, lng, severity, description,
@@ -107,6 +139,7 @@ def add_report(asset_type, lat, lng, severity, description="",
         (asset_type, lat, lng, severity, description,
          people_affected, businesses_affected, workers_affected,
          status, created_at or now()),
+        path,
     )
 
 
@@ -131,11 +164,12 @@ def update_report_status(report_id, status):
 
 # ---------- Crews ----------
 
-def add_crew(name, skill, lat, lng, status="Available", hours_worked=0):
+def add_crew(name, skill, lat, lng, status="Available", hours_worked=0, path=None):
     """Save a new crew and return its id."""
     return run(
         "INSERT INTO crews (name, skill, lat, lng, status, hours_worked) VALUES (?, ?, ?, ?, ?, ?)",
         (name, skill, lat, lng, status, hours_worked),
+        path,
     )
 
 

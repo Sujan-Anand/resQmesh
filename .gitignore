@@ -1,7 +1,11 @@
 __pycache__/
-# Local database: recreate with  py server/seed.py
+# Local databases: resqmesh.db is real data, resqmesh_demo.db is recreated from demo_data.py
 server/resqmesh.db
 server/resqmesh.db-journal
+server/resqmesh_demo.db
+server/resqmesh_demo.db-journal
+# Remembers the Demo mode choice on this laptop
+server/settings.json
 # Local database backups
 backups/
 # Claude Code: keep local files out, but share the project settings

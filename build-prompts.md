@@ -178,18 +178,30 @@ Use ui.download so the files save from the browser.
 
 ## PHASE 6 · Polish and APK (hour 18–21)
 
-### Prompt 9 – Demo reset and polish
+### Prompt 9 – Demo mode on/off and polish
 ```
 Read resqmesh-brief.md first.
 
-1. Add a small "Demo" menu on the Dashboard with "Reset demo data" (clears tables and reloads demo_data.py) and a "DEMO DATA" badge when demo data is loaded.
+1. Add a Demo mode ON/OFF switch in the sidebar (visible on every page):
+   - Use two separate database files: server/resqmesh_demo.db (demo data) and server/resqmesh.db (real data). The switch only changes which file the app reads and writes, so real data is never deleted by demo mode.
+   - Demo mode ON: use resqmesh_demo.db (create it from demo_data.py if missing) and show an orange "DEMO DATA" badge at the top of every page.
+   - Demo mode OFF: use resqmesh.db with real data only (it may start empty; show a friendly "No incidents yet" message instead of an empty table).
+   - Save the choice in a small server/settings.json so it survives a server restart. Default: ON.
+   - When Demo mode is ON, also show a "Reset demo data" button that reloads demo_data.py into resqmesh_demo.db only.
+   - The REST API used by the phone app follows the same switch, and GET /api/mode returns {"demo": true/false} so the phone app can show a small "DEMO" label.
+   - Switching mode refreshes the current page so the queue, map, crews, analytics and reports all show the new data.
 2. Check every page works at phone width: tables scroll sideways inside their box, the sidebar collapses to a menu button.
 3. Make sure all colors follow the brief and every button has a clear label.
-Don't add any new features.
+Don't add any other new features.
 ```
 
 ### ✅ Phase 6 checks
-- [ ] "Reset demo data" restores the starting state.
+- [ ] Switch Demo mode ON: the DEMO DATA badge shows and the demo incidents and crews appear on every page.
+- [ ] Switch Demo mode OFF: the badge disappears and only real data shows (or "No incidents yet").
+- [ ] Add a report with Demo mode OFF, switch ON and back OFF: the real report is still there.
+- [ ] Restart the server: it remembers the last mode.
+- [ ] "Reset demo data" appears only in Demo mode and restores the starting demo state without touching real data.
+- [ ] A report sent from the phone lands in whichever mode is active; `http://localhost:8080/api/mode` shows the right value.
 - [ ] Every page is usable on a phone browser.
 - [ ] C's APK is built and installed; it reports to the server using the laptop IP.
 - [ ] Pushed to GitHub.
@@ -201,7 +213,8 @@ Don't add any new features.
 No new features. Only fixes.
 
 ### ✅ Final checks
-- [ ] Fresh start: `py server/seed.py`, then `py server/main.py`. Dashboard loads.
+- [ ] Fresh start: `py server/main.py` with Demo mode ON. Dashboard loads with demo data.
+- [ ] Decide before judging: Demo mode ON for the presentation (full map and analytics), OFF to show it working with real input.
 - [ ] Full demo story works twice: phone report → appears on map and queue with score → "Why?" → suggested crew → safety checklist → assign → phone Start → Restored → Restore First updates → export CSV.
 - [ ] Backup video of the demo is recorded (D).
 - [ ] README.md explains what ResQMesh does, how to run the server and how to install the APK.
