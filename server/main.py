@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from nicegui import app, ui
 from pydantic import BaseModel, Field
 
+import analytics
 import assignment
 import database
 import scoring
@@ -53,7 +54,7 @@ class NewReport(BaseModel):
     lat: float = Field(ge=-90, le=90)
     lng: float = Field(ge=-180, le=180)
     severity: int = Field(ge=1, le=5)
-    description: str = ""
+    description: str | None = ""  # the phone may send null for an empty description
     people_affected: int = Field(default=0, ge=0)
     businesses_affected: int = Field(default=0, ge=0)
     workers_affected: int = Field(default=0, ge=0)
@@ -65,6 +66,7 @@ def api_add_report(new_report: NewReport):
     new_report.asset_type = new_report.asset_type.strip().lower()
     if new_report.asset_type not in scoring.CRITICALITY:
         raise HTTPException(400, f"asset_type must be one of: {', '.join(scoring.CRITICALITY)}")
+    new_report.description = new_report.description or ""
     report = save_report(**new_report.model_dump())
     return {"id": report["id"], "score": report["score"], "level": report["level"]}
 
@@ -230,7 +232,7 @@ def incident_marker(report):
     # escape() stops text typed into a report from being run as HTML in the popup
     popup = (f"<b>{escape(report['asset_type'].title())}</b> - score {report['score']} ({report['level']})"
              f"<br>Status: {escape(report['status'])}"
-             f"<br>{escape(report['description'] or '')}")
+             f"<br><span style='overflow-wrap: anywhere'>{escape(report['description'] or '')}</span>")
     return (report["lat"], report["lng"], color, 9, popup)
 
 
@@ -277,7 +279,8 @@ def dashboard_page():
         why_content.clear()
         with why_content:
             ui.label(f"Why {report['score']} / 100?").classes("text-h6")
-            ui.label(f"#{report['id']} {report['asset_type']} - {report['description']}").classes("text-caption")
+            ui.label(f"#{report['id']} {report['asset_type']} - {report['description']}") \
+                .classes("text-caption").style("overflow-wrap: anywhere")
             # One bar per part of the score, filled to points / maximum points
             for part, points in report["breakdown"].items():
                 max_points = scoring.MAX_POINTS[part]
@@ -431,7 +434,8 @@ def dashboard_page():
                     continue
                 ui.label(str(report["score"])).classes("text-bold")
                 ui.badge(report["level"], color=LEVEL_COLORS[report["level"]])
-                with ui.column().classes("gap-0 w-full break-words"):
+                # overflow-wrap: anywhere breaks a very long word (e.g. a pasted link) instead of overflowing
+                with ui.column().classes("gap-0 w-full").style("overflow-wrap: anywhere"):
                     ui.label(f"{report['asset_type'].title()} - {report['status']}").classes("text-bold")
                     ui.label(report["description"]).classes("text-body2")
                     if report["status"] == "Reported":
@@ -668,10 +672,106 @@ def crews_page():
     ui.timer(10, refresh_if_changed)
 
 
+def rupees(amount):
+    """Format a number as rupees, e.g. ₹1,275,000."""
+    return f"₹{amount:,.0f}"
+
+
 @ui.page("/analytics")
 def analytics_page():
     layout("Analytics")
-    ui.label("Coming soon").classes("text-h5 text-grey")
+
+    # The assumption behind every rupee figure on this page
+    ui.label(analytics.ASSUMPTION).classes("text-subtitle1 text-bold q-pa-sm rounded-borders") \
+        .style("background: #FFF8E1; border-left: 4px solid #F9A825")
+
+    def total_card(title, value, note=""):
+        with ui.card().classes("min-w-48"):
+            ui.label(title).classes("text-caption text-grey-7")
+            ui.label(value).classes("text-h4 text-bold").style(f"color: {NAVY}")
+            if note:
+                ui.label(note).classes("text-caption text-grey-7")
+
+    @ui.refreshable
+    def content():
+        totals = analytics.totals()
+        with ui.row():
+            total_card("Businesses affected", f"{totals['businesses_affected']:,}", "by open incidents")
+            total_card("Workers affected", f"{totals['workers_affected']:,}", "by open incidents")
+            total_card("Total daily loss", rupees(totals["daily_loss"]), "businesses × ₹15,000 per day")
+            total_card("Restored vs open", f"{totals['restored']} / {totals['open']}", "restored / still open")
+
+        # Restore First: open incidents ranked by economic impact
+        ui.label("Restore First").classes("text-h6 q-mt-md")
+        ui.label("Open incidents ranked by impact = businesses × ₹15,000 × days down") \
+            .classes("text-caption text-grey-7")
+        rows = [{
+            "rank": rank,
+            "asset": report["asset_type"].title(),
+            "description": report["description"],
+            "businesses": report["businesses_affected"],
+            "workers": report["workers_affected"],
+            "days_down": f"{report['days_down']:.2f}",
+            "impact": rupees(report["impact"]),
+            "status": report["status"],
+        } for rank, report in enumerate(analytics.restore_first(), start=1)]
+        ui.table(
+            columns=[
+                {"name": "rank", "label": "#", "field": "rank", "align": "left"},
+                {"name": "asset", "label": "Asset", "field": "asset", "align": "left"},
+                {"name": "description", "label": "Description", "field": "description", "align": "left"},
+                {"name": "businesses", "label": "Businesses", "field": "businesses"},
+                {"name": "workers", "label": "Workers", "field": "workers"},
+                {"name": "days_down", "label": "Days down", "field": "days_down"},
+                {"name": "impact", "label": "Impact (₹)", "field": "impact"},
+                {"name": "status", "label": "Status", "field": "status", "align": "left"},
+            ],
+            rows=rows, row_key="rank",
+        ).classes("w-full")
+
+        # Bar chart: one bar per asset type
+        ui.label("Impact by asset type").classes("text-h6 q-mt-md")
+        ui.label("Economic impact so far, open and restored incidents (₹)").classes("text-caption text-grey-7")
+        by_type = analytics.impact_by_asset_type()
+        ui.echart({
+            "animation": False,
+            "tooltip": {"trigger": "axis"},
+            "grid": {"left": 90, "right": 20, "top": 30, "bottom": 50},
+            # interval 0 = show the name under every bar
+            "xAxis": {"type": "category", "data": [asset.title() for asset in by_type],
+                      "axisLabel": {"interval": 0, "rotate": 30}},
+            "yAxis": {"type": "value", "name": "₹"},
+            "series": [{"type": "bar", "data": list(by_type.values()), "itemStyle": {"color": TEAL}}],
+        }).classes("w-full h-72")
+
+        # Workforce summary: hours and tasks per crew, and skills in short supply
+        ui.label("Workforce summary").classes("text-h6 q-mt-md")
+        workforce = analytics.workforce_summary()
+        ui.table(
+            columns=[
+                {"name": "name", "label": "Crew", "field": "name", "align": "left"},
+                {"name": "skill", "label": "Skill", "field": "skill", "align": "left"},
+                {"name": "status", "label": "Status", "field": "status", "align": "left"},
+                {"name": "hours", "label": "Hours worked", "field": "hours"},
+                {"name": "tasks_done", "label": "Tasks done", "field": "tasks_done"},
+                {"name": "warning", "label": "Warning", "field": "warning", "align": "left"},
+            ],
+            rows=[{**crew, "hours": f"{crew['hours_worked']:g} h"} for crew in workforce["crews"]],
+            row_key="id",
+        ).classes("w-full")
+
+        ui.label("Skills in short supply").classes("text-subtitle1 text-bold q-mt-sm")
+        if workforce["short_supply"]:
+            for item in workforce["short_supply"]:
+                ui.chip(f"{item['skill'].title()}: {item['open_incidents']} open incident(s), no crew available",
+                        icon="warning", color="orange", text_color="white")
+        else:
+            ui.label("None - every skill needed by an open incident has a crew available.") \
+                .classes("text-body2 text-grey-7")
+
+    content()
+    # Impact grows with time and changes when incidents are restored, so keep the page current
+    ui.timer(10, content.refresh)
 
 
 @ui.page("/reports")
