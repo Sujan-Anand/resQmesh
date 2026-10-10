@@ -2,4 +2,6 @@ __pycache__/
 # Local database: recreate with  py server/seed.py
 server/resqmesh.db
 server/resqmesh.db-journal
-.claude/
+# Claude Code: keep local files out, but share the project settings
+.claude/*
+!.claude/settings.json
