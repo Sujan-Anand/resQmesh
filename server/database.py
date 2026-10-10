@@ -81,6 +81,18 @@ def init_db():
         conn.commit()
 
 
+def clear_all():
+    """Delete every report, crew and assignment, and start their ids again from 1."""
+    with closing(connect()) as conn:
+        conn.executescript("""
+            DELETE FROM assignments;
+            DELETE FROM reports;
+            DELETE FROM crews;
+            DELETE FROM sqlite_sequence WHERE name IN ('assignments', 'reports', 'crews');
+        """)
+        conn.commit()
+
+
 # ---------- Reports ----------
 
 def add_report(asset_type, lat, lng, severity, description="",

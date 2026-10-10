@@ -14,6 +14,7 @@ import assignment
 import database
 import reports
 import scoring
+import seed
 
 NAVY = "#0F2A44"
 TEAL = "#0B7A6F"
@@ -207,7 +208,7 @@ def layout(title):
     # "primary" is the colour NiceGUI uses for buttons, so all buttons become teal
     ui.colors(primary=TEAL)
 
-    with ui.left_drawer(fixed=True).props("width=220").style(f"background-color: {NAVY}"):
+    with ui.left_drawer(fixed=True).props("width=220").style(f"background-color: {NAVY}") as drawer:
         ui.label("ResQMesh").classes("text-white text-h5 text-bold")
         ui.label("Restore what matters first").classes("text-white text-caption q-mb-md")
         for label, target, icon in NAV_LINKS:
@@ -216,14 +217,17 @@ def layout(title):
                     ui.icon(icon)
                     ui.label(label).classes("text-subtitle1")
 
-    ui.label(title).classes("text-h4 text-bold").style(f"color: {NAVY}")
+    with ui.row().classes("items-center"):
+        # On phones the sidebar is hidden; this button (shown only on narrow screens) opens it
+        ui.button("Menu", icon="menu", on_click=drawer.toggle).props("outline dense").classes("lt-md")
+        ui.label(title).classes("text-h4 text-bold").style(f"color: {NAVY}")
 
 
-def summary_card(title, value, color):
+def summary_card(title, value, color=NAVY):
     """One small card with a big number."""
     with ui.card().classes("w-48"):
         ui.label(title).classes("text-caption text-grey-7")
-        ui.label(str(value)).classes(f"text-h4 text-bold text-{color}")
+        ui.label(str(value)).classes("text-h4 text-bold").style(f"color: {color}")
 
 
 def incident_marker(report):
@@ -257,7 +261,7 @@ def crew_line(crew, km):
 def fatigue_chip(crew):
     """Show the orange fatigue chip when the crew has worked 10 h or more."""
     if assignment.fatigue_warning(crew):
-        ui.chip("Fatigue warning", icon="warning", color="orange", text_color="white").props("dense")
+        ui.chip("Fatigue warning", icon="warning", color=LEVEL_COLORS["High"], text_color="white").props("dense")
 
 
 def legend_dot(color, label, size=14):
@@ -411,11 +415,12 @@ def dashboard_page():
         open_reports = [r for r in reports if r["status"] != "Restored"]
         today = database.now()[:10]
         with ui.row():
-            summary_card("Critical incidents", sum(r["level"] == "Critical" for r in open_reports), "red")
-            summary_card("In progress", sum(r["status"] == "In Progress" for r in reports), "orange")
+            summary_card("Critical incidents", sum(r["level"] == "Critical" for r in open_reports),
+                         LEVEL_COLORS["Critical"])
+            summary_card("In progress", sum(r["status"] == "In Progress" for r in reports), TEAL)
             summary_card("Restored today",
-                         sum((r["restored_at"] or "").startswith(today) for r in reports), "green")
-            summary_card("Open incidents", len(open_reports), "blue-grey-9")
+                         sum((r["restored_at"] or "").startswith(today) for r in reports), RESTORED_COLOR)
+            summary_card("Open incidents", len(open_reports))
 
     def queue_rows(reports):
         """One row per open incident (highest score first) with its suggested or assigned crew."""
@@ -522,9 +527,29 @@ def dashboard_page():
         markers.clear()
         update_map(scored_reports())
 
-    with ui.row():
+    # Demo reset: asks first, because it deletes everything
+    with ui.dialog() as reset_dialog, ui.card().classes("w-96"):
+        ui.label("Reset demo data?").classes("text-h6")
+        ui.label("This deletes every report, crew and assignment and loads the demo data again.") \
+            .classes("text-body2")
+
+        def reset_demo():
+            seed.reset_demo_data()
+            reset_dialog.close()
+            ui.navigate.reload()  # redraw the whole page from the fresh data
+
+        with ui.row().classes("w-full justify-end"):
+            ui.button("Cancel", on_click=reset_dialog.close).props("flat")
+            ui.button("Reset demo data", on_click=reset_demo)
+
+    with ui.row().classes("items-center"):
         ui.button("Add report", icon="add", on_click=open_add_form)
         ui.button("Refresh", icon="refresh", on_click=lambda: refresh(force=True)).props("outline")
+        with ui.button("Demo", icon="arrow_drop_down").props("outline"):
+            with ui.menu():
+                ui.menu_item("Reset demo data", on_click=reset_dialog.open)
+        if seed.demo_data_loaded():
+            ui.badge("DEMO DATA", color=LEVEL_COLORS["Medium"], text_color="black").classes("text-bold q-pa-xs")
 
     reports = scored_reports()
     summary_cards(reports)
@@ -679,7 +704,8 @@ def crews_page():
                         if warning:
                             blocked = crew["hours_worked"] >= assignment.SHIFT_LIMIT_HOURS
                             ui.chip(warning, icon="block" if blocked else "warning",
-                                    color="red" if blocked else "orange", text_color="white").props("dense")
+                                    color=LEVEL_COLORS["Critical" if blocked else "High"],
+                                    text_color="white").props("dense")
                     ui.label(f"{crew['lat']:.4f}, {crew['lng']:.4f}")
                     with ui.row().classes("gap-1 no-wrap"):
                         ui.button("Edit", on_click=lambda c=crew: open_form(c["id"])).props("flat dense")
@@ -788,7 +814,7 @@ def analytics_page():
         if workforce["short_supply"]:
             for item in workforce["short_supply"]:
                 ui.chip(f"{item['skill'].title()}: {item['open_incidents']} open incident(s), no crew available",
-                        icon="warning", color="orange", text_color="white")
+                        icon="warning", color=LEVEL_COLORS["High"], text_color="white")
         else:
             ui.label("None - every skill needed by an open incident has a crew available.") \
                 .classes("text-body2 text-grey-7")
@@ -828,9 +854,9 @@ def reports_page():
         # Incidents by status, restored today and safety checklists
         with ui.row():
             for status, count in summary["by_status"].items():
-                summary_card(status, count, "blue-grey-9")
-            summary_card("Restored today", summary["restored_today"], "green")
-            summary_card("Safety checklists completed", summary["safety_checklists"], "teal")
+                summary_card(status, count)
+            summary_card("Restored today", summary["restored_today"], RESTORED_COLOR)
+            summary_card("Safety checklists completed", summary["safety_checklists"], TEAL)
 
         ui.label("Top 5 by impact").classes("text-subtitle1 text-bold q-mt-md")
         ui.table(
